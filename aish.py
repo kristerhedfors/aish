@@ -638,14 +638,10 @@ class LLM(object):
         state_file = self.state_dir / self.state_name
         if state_file.exists():
             os.remove(state_file)
-
+    
     def load_model(self):
-        model_file = Path.home() / ".aimodel"
-        if model_file.exists():
-            with open(model_file, 'r') as f:
-                return f.read().strip()
-        else:
-            return "gpt-3.5-turbo"
+        #return "gpt-4-0613"
+        return "gpt-3.5-turbo"
 
     def ask(self, question, default_language=None):
         state = self.load_state()
