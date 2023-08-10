@@ -40,3 +40,5 @@ lab/
 *.png
 
 function_calling.md
+
+example*.py
