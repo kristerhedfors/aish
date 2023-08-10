@@ -25,6 +25,7 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+env.sh
 
 # pytest
 .pytest_cache/
@@ -32,3 +33,10 @@ venv.bak/
 # VSCode
 .vscode/
 *.code-workspace
+
+./aish
+lab/
+
+*.png
+
+function_calling.md

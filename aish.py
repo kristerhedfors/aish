@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import sys
+import re
 import argparse
 import cmd
 import readline
@@ -9,6 +10,7 @@ import os.path
 from pathlib import Path
 import shlex
 import subprocess
+import ipdb
 import ast
 import json
 import time
@@ -32,7 +34,8 @@ import textract
 import textract.exceptions
 from collections.abc import Callable
 from agent_dingo import AgentDingo
-agent = AgentDingo(allow_codegen=False)
+import shodan
+import socket
 
 
 def debug(*args):
@@ -1289,26 +1292,6 @@ class AddNumbersCommand(Command):
         print(f"Sum: {sum(args.nums)}")
 
 
-@agent.function
-def get_age(name):
-    '''Retrieve the age of named person
-
-    Parameters
-    ----------
-    name : str
-        The name of the person
-    
-    Returns
-    -------
-    str
-        The age of the person
-    '''
-    if name.lower().find('john') >= 0:
-        return "20"
-    if name.lower().find('mary') >= 0:
-        return "30"
-    return "10"
-
 
 class DingoCommand(Command):
     command_name = 'dingo'
@@ -1324,8 +1307,166 @@ class DingoCommand(Command):
     def func(self, args):
         self.args = args
         question = ' '.join(args.question)
+        agent = AgentDingo(allow_codegen=False)
+        @agent.function
+        def get_age(name):
+            '''Retrieve the age of named person
+
+            Parameters
+            ----------
+            name : str
+                The name of the person
+            
+            Returns
+            -------
+            str
+                The age of the person
+            '''
+            if name.lower().find('john') >= 0:
+                return "20"
+            if name.lower().find('mary') >= 0:
+                return "30"
+            return "10"
         answer = agent.chat(question, before_function_call=self.before_function_call)
         print(answer)
+
+
+class FsCommand(Command):
+    command_name = 'fs'
+    help_text = 'fs <file system related query>: Query the file system, using provided system functions'
+
+    def _init_arguments(self):
+        self.parser.add_argument('question', nargs='+', help='fs command')
+
+    def before_function_call(self, function_name: str, function_callable: Callable, function_kwargs: dict):
+        print(f"[fs] Calling function {function_name} with arguments {function_kwargs}")
+        return function_callable, function_kwargs
+
+    def func(self, args):
+        self.args = args
+        question = ' '.join(args.question)
+        agent = AgentDingo(allow_codegen=False)
+
+        @agent.function
+        def stat(path):
+            '''Retrieve stat info from file
+
+            Parameters
+            ----------
+            path : str
+                Path of file
+            
+            Returns
+            -------
+            result : str
+                Stat result in json format
+            '''
+            st = os.stat(path)
+            # convert os.stat results to json
+            js = {}
+            for key in dir(st):
+                if key.startswith('st_'):
+                    js[key] = getattr(st, key)
+            return json.dumps(js)
+        
+        @agent.function
+        def listdir(path):
+            '''List directory contents
+
+            Parameters
+            ----------
+            path : str
+                Path of directory
+            
+            Returns
+            -------
+            result : str
+                List of directory contents
+            '''
+            return json.dumps(os.listdir(path))
+        
+        @agent.function
+        def execute(command):
+            '''Execute command
+
+            Parameters
+            ----------
+            command : str
+                List of string arguments
+            
+            Returns
+            -------
+            result : str
+                command output
+            '''
+            # highlight the prompt
+            print('\033[1m')
+            # prompt user with y/n before executing
+            print(f"[AI] The machine wants to run this command:\n[AI]\n[AI]    `{command}`\n[AI]")
+            answer = input("[AI] Obey? [y/n] ")
+            # unhighlight the prompt
+            print('\033[0m')
+            if answer.lower() != 'y':
+                return "Command not executed due to human intervention."
+            result = subprocess.check_output(command, shell=True).decode('utf-8')
+            return result[:4096]
+
+
+        answer = agent.chat(question, before_function_call=self.before_function_call)
+        print(answer)
+        print('\n')
+        print(answer[0])
+
+
+class ShodanCommand(Command):
+    '''Ask LLM a question while providing shodan API access'''
+    command_name = 'shodan'
+    help_text = 'shodan <question>: Ask LLM a question while providing shodan API access'
+
+    def _init_arguments(self):
+        self.parser.add_argument('question', nargs='+', help='Question to ask LL')
+
+    def before_function_call(self, function_name: str, function_callable: Callable, function_kwargs: dict):
+        print(f"[shodan] Calling function {function_name} with arguments {function_kwargs}")
+        return function_callable, function_kwargs
+
+    def func(self, args):
+        self.args = args
+        question = ' '.join(args.question)
+        agent = AgentDingo(allow_codegen=False)
+
+        @agent.function
+        def host(ip_or_hostname):
+            '''Query Shodan's record for hostname- or IP address
+
+                Parameters
+                ----------
+                ip_or_hostname : str
+                    The host to query
+                
+                Returns
+                -------
+                json
+            '''
+            api = shodan.Shodan(os.getenv('SHODAN_API_KEY'))
+
+            # resolve if not already an IP:
+            ip = ip_or_hostname if re.match(r'\d+\.\d+\.\d+\.\d+', ip_or_hostname) else socket.gethostbyname(ip_or_hostname)
+            result = api.host(ip)
+
+            # recursively trim strings to max 80 chars
+            result = {k: (v[:80] if isinstance(v, str) else v) for k, v in result.items()}
+
+            # delete the largest key-value pairs until length of json.dumps is at most 4096 bytes
+            while len(json.dumps(result)) > 1000:
+                max_key = max(result, key=lambda k: len(str(result[k])))
+                del result[max_key]
+            return json.dumps(result)
+        
+        
+        answer = agent.chat(question, before_function_call=self.before_function_call)
+        print(answer[0])
+
 
 
 def main():
@@ -1345,6 +1486,8 @@ def main():
     list_classes = ListClassesCommand(subparsers)
     add_numbers = AddNumbersCommand(subparsers)
     dingo = DingoCommand(subparsers)
+    fs = FsCommand(subparsers)
+    shodan = ShodanCommand(subparsers)
 
     #
     # command line invocation ends here
@@ -1372,7 +1515,7 @@ def main():
 
     while True:
         try:
-            text = session.prompt("[gpt-3.5-turbo]:AISh >>> ", auto_suggest=AutoSuggestFromHistory())
+            text = session.prompt("AI <<< ", auto_suggest=AutoSuggestFromHistory())
         except KeyboardInterrupt:
             continue  # Ctrl+C pressed, let's ask for input again
         except EOFError:
@@ -1398,56 +1541,3 @@ if __name__ == "__main__":
         unittest.main()
         sys.exit()
     sys.exit(main())
-
-
-#import subprocess
-#import pexpect
-#
-#if 0: 
-#    class Test_InteractiveShell(unittest.TestCase):
-#        def test_sum_command_line(self):
-#            output = subprocess.check_output(["python3", "aish.py", "sum", "1", "2"])
-#            self.assertEqual(output.strip(), b'3')
-#
-#        def test_greet_command_line(self):
-#            output = subprocess.check_output(["python3", "aish.py", "greet", "Alice"])
-#            self.assertEqual(output.strip(), b'Hello, Alice!')
-#
-#        def test_sum_interactive_shell(self):
-#            child = pexpect.spawn('python3 aish.py')
-#            child.sendline('sum 1 2')
-#            child.expect('3')
-#            child.sendline('quit')
-#
-#        def test_greet_interactive_shell(self):
-#            child = pexpect.spawn('python3 aish.py')
-#            child.sendline('greet Alice')
-#            child.expect('Hello, Alice!')
-#            child.sendline('quit')
-#
-#if __name__ == '__main__':
-#    import sys
-#    if '--test' in sys.argv:
-#        sys.argv.remove('--test')
-#        unittest.main()
-#        sys.exit()
-#
-#    if len(sys.argv) > 1:
-#        # Command line mode
-#        shell = InteractiveShell()
-#        try:
-#            shell.parser.parse_args(sys.argv[1:]).func(shell.parser.parse_args(sys.argv[1:]))
-#        except:
-#            extype, value, tb = sys.exc_info()
-#            traceback.print_exc()
-#            pdb.post_mortem(tb)
-#    else:
-#
-#        # Interactive mode
-#        try:
-#            InteractiveShell().cmdloop()
-#        except:
-#            extype, value, tb = sys.exc_info()
-#            traceback.print_exc()
-#            pdb.post_mortem(tb)
-####################################################
