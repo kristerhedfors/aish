@@ -10,7 +10,6 @@ import os.path
 from pathlib import Path
 import shlex
 import subprocess
-import ipdb
 import ast
 import json
 import time
@@ -36,11 +35,41 @@ from collections.abc import Callable
 from agent_dingo import AgentDingo
 import shodan
 import socket
+import pdb
+
+# spawn an interactive ipython shell on all exceptions
+def info(type, value, tb):
+    traceback.print_exception(type, value, tb)
+    print()
+    pdb.pm()
+
+sys.excepthook = info
+
+
+# return clipboard data as string
+def get_clipboard():
+    # make this work for default-installed macos
+    if sys.platform == 'darwin':
+        return subprocess.check_output('pbpaste', universal_newlines=True)
+    else:
+        raise NotImplementedError('Only MacOS is supported for now.')
 
 
 def debug(*args):
     msg = ' '.join([str(arg) for arg in args])
     logging.debug(msg)
+
+
+def list_gpt_models():
+    # print available openai GPT models
+    models = openai.Engine.list()
+    for model in models['data']:
+        # We're only interested in GPT models, since primarily those
+        # are useable through the chat API we make use of.
+        if 'gpt' in model['id']:
+            print(model['id'])
+
+
 
 
 def _send_to_openai(endpoint_url: str,):
@@ -917,8 +946,25 @@ class AskCommand(Command):
         self.parser.add_argument('question', nargs='+', help='Update instruction to LLM')
 
     def func(self, args):
-        self.args = args
+        super().func(args)
         question = ' '.join(args.question)
+        answer = self.llm().ask(question)
+        print(answer)
+
+
+class ClipboardCommand(Command):
+    command_name = 'clipboard'
+    help_text = 'Asks LLM about current clipboard data'
+
+    def _init_arguments(self):
+        pass
+        #self.parser.add_argument('question', nargs='+', help='Update instruction to LLM')
+
+    def func(self, args):
+        super().func(args)
+        question = 'What can you tell me about the data pasted below the line?:\n'
+        question += '----------------------------------------\n'
+        question += get_clipboard()
         answer = self.llm().ask(question)
         print(answer)
 
@@ -934,7 +980,7 @@ class SummarizeFileCommand(Command):
         self.parser.add_argument('-l', '--limit', help='Limit summary length to this many characters', type=int, default=500)
     
     def func(self, args):
-        self.args = args
+        super().func(args)
         text = None
         # use textract by default, fallback to reading the file
         try:
@@ -989,6 +1035,7 @@ class _LanguageHelpers(object):
 
 
 class _PythonCommandHelpers(object):
+
     def _update_node(self, command_name, file_path, node_type, node_name, instruction, yes=False):
         instruction = ' '.join(instruction)
         file_language = self._get_file_language(file_path)
@@ -1040,8 +1087,7 @@ class UpdateFileCommand(Command, _LanguageHelpers, _PythonCommandHelpers):
         self.parser.add_argument('instruction', nargs='+', help='Update instruction to LLM')
     
     def func(self, args):
-        self.args = args
-        debug(f"{self.command_name} executed with arguments: {args}")
+        super().func(args)
         instruction = ' '.join(args.instruction)
         with open(args.file_path) as f:
             contents = f.read()
@@ -1094,8 +1140,7 @@ class MassAsk(Command, _LanguageHelpers, _PythonCommandHelpers):
         self.parser.add_argument('question', nargs='+', help='Question to ask LLM')
     
     def func(self, args):
-        self.args = args
-        debug(f"{self.command_name} executed with arguments: {args}")
+        super().func(args)
         if args.xargs_I:
             debug(f"mass-ask with xargs")
             time.sleep(1)
@@ -1160,12 +1205,16 @@ class MassUpdateFile(Command, _LanguageHelpers, _PythonCommandHelpers):
 
     def _init_arguments(self):
         self.parser.add_argument('-y', '--yes', action='store_true', help='Accept all changes without prompting')
-        self.parser.add_argument('instruction', help='File update instruction to LLM')
+        #
+        # I need to fix the following bug: the `instruction` argument below is not parsed correctly. A multi-word
+        # argument separated by blank spaces is split into multiple arguments which spill over to `files` argument.
+        # I want to allow blank spaces within the `instruction` argument and have it treated as just one argument.
+        #
+        self.parser.add_argument('instruction',  help='Update instruction to LLM')
         self.parser.add_argument('files', nargs='+', help='Files to be updated')
     
     def func(self, args):
-        self.args = args
-        debug(f"{self.command_name} executed with arguments: {args}")
+        super().func(args)
         asyncio.run(self.mass_update_file(args))
 
     async def mass_update_file(self, args):
@@ -1218,6 +1267,72 @@ class MassUpdateFile(Command, _LanguageHelpers, _PythonCommandHelpers):
                 new_instruction = choice
                 answer = self.llm(state_name=answer.state_name).ask(new_instruction)
                 print(answer.highlight())
+
+
+class EmbeddingsCommand(Command, _LanguageHelpers, _PythonCommandHelpers):
+    command_name = 'embeddings'
+    help_text = 'embeddings <question...>: Update files according to instruction:'
+
+    def _init_arguments(self):
+        self.parser.add_argument('-P', '--parallelism', type=int, default=10, help='Parallelsm in requests to LLM; default=10')
+        self.parser.add_argument('-I', '--xargs-I', type=str, help='Placeholder in question to replce with lines read from stdin')
+        self.parser.add_argument('question', nargs='+', help='Question to ask LLM')
+    
+    def func(self, args):
+        super().func(args)
+        if args.xargs_I:
+            debug(f"embeddings with xargs")
+            time.sleep(1)
+            asyncio.run(self.embeddings_xargs(args))
+        else:
+            debug(f"embeddings without xargs")
+            time.sleep(1)
+            asyncio.run(self.embeddings(args))
+    
+    def stdin_callback(self):
+        debug(f"EmbeddingsCommand:stdin_callback")
+        line = sys.stdin.readline()
+        if line == '':
+            loop = asyncio.get_running_loop()
+            loop.remove_reader(sys.stdin)
+            self.completed = True
+            return
+        line = line.strip()
+        if line == '': # don't ask for empty lines
+            return
+        question = self.template.replace(self.args.xargs_I, line)
+        task = asyncio.create_task(self.llm().ask_async(question, semaphore=self.semaphore))
+        self.tasks.append(task)
+    
+    # if -I
+    async def embeddings_xargs(self, args):
+        self.tasks = []
+        self.semaphore = asyncio.Semaphore(args.parallelism)
+        self.template = ' '.join(args.question)
+        self.completed = False
+        loop = asyncio.get_running_loop()
+        loop.add_reader(sys.stdin, self.stdin_callback)
+        while True:
+            if self.completed:
+                debug(f"embeddings_xargs completed")
+                tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+                await asyncio.gather(*tasks)
+                #asyncio.get_running_loop().stop() 
+                break
+            debug(f"embeddings_xargs sleep")
+            await asyncio.sleep(1)
+    
+    # default, if not -I
+    async def embeddings(self, args):
+        debug(f"{self.command_name} executed with arguments: {args}")
+        self.semaphore = asyncio.Semaphore(args.parallelism)
+        coroutines = []
+        question = ' '.join(args.question)
+        for i in range(args.count):
+            async with self.semaphore:
+                task = self.llm().ask_async(question)
+                coroutines.append(task)
+        results = await asyncio.gather(*coroutines)
     
 
 class UpdateFunctionCommand(Command, _LanguageHelpers, _PythonCommandHelpers):
@@ -1231,6 +1346,7 @@ class UpdateFunctionCommand(Command, _LanguageHelpers, _PythonCommandHelpers):
         self.parser.add_argument('instruction', nargs='+', help='Update instruction to LLM')
     
     def func(self, args):
+        super().func(args)
         return self._update_node(self.command_name, args.file_path, ast.FunctionDef, args.func_name,
                                  args.instruction, yes=args.yes)
 
@@ -1246,6 +1362,7 @@ class UpdateClassCommand(Command, _LanguageHelpers, _PythonCommandHelpers):
         self.parser.add_argument('instruction', nargs='+', help='Update instruction to LLM')
     
     def func(self, args):
+        super().func(args)
         return self._update_node(self.command_name, args.file_path, ast.ClassDef, args.class_name,
                                  args.instruction, yes=args.yes)
 
@@ -1258,6 +1375,7 @@ class ListFunctionsCommand(Command, _LanguageHelpers, _PythonCommandHelpers):
         self.parser.add_argument('file_path', help='Python file containing functions')
     
     def func(self, args):
+        super().func(args)  
         with open(args.file_path) as f:
             source = f.read()
         tree = ast.parse(source)
@@ -1273,6 +1391,7 @@ class ListClassesCommand(Command, _LanguageHelpers, _PythonCommandHelpers):
         self.parser.add_argument('file_path', help='Python file containing classes')
     
     def func(self, args):
+        super().func(args)  
         with open(args.file_path) as f:
             source = f.read()
         tree = ast.parse(source)
@@ -1288,7 +1407,7 @@ class AddNumbersCommand(Command):
         self.parser.add_argument('nums', nargs='+', type=int, help='Numbers to be added')
     
     def func(self, args):
-        print(f"{self.command_name} executed with arguments: {args}")
+        super().func(args)  
         print(f"Sum: {sum(args.nums)}")
 
 
@@ -1305,7 +1424,7 @@ class DingoCommand(Command):
         return function_callable, function_kwargs
 
     def func(self, args):
-        self.args = args
+        super().func(args)  
         question = ' '.join(args.question)
         agent = AgentDingo(allow_codegen=False)
         @agent.function
@@ -1330,6 +1449,60 @@ class DingoCommand(Command):
         answer = agent.chat(question, before_function_call=self.before_function_call)
         print(answer)
 
+#
+# DoCommand - like `AskCommand` but ask for a specific task to be done
+# in the shell and ask the LLM for one- or a sequence of commands to execute.
+# Prompt user before each individual command
+# Use dingo to present an `execute` function to the LLM.`
+#
+class DoCommand(Command):
+    command_name = 'do'
+    help_text = 'do <task>: Ask LLM to do a task'
+
+    def _init_arguments(self):
+        self.parser.add_argument('task', nargs='+', help='Task to do')
+
+    def before_function_call(self, function_name: str, function_callable: Callable, function_kwargs: dict):
+        print(f"[do] Calling function {function_name} with arguments {function_kwargs}")
+        return function_callable, function_kwargs
+    
+    def func(self, args):
+        super().func(args)  
+        task = ' '.join(args.task)
+        agent = AgentDingo(allow_codegen=False)
+        @agent.function
+        def execute(command):
+            '''Execute command
+
+            Parameters
+            ----------
+            command : str
+                List of string arguments
+            
+            Returns
+            -------
+            result : json
+                Result of command
+            '''
+            # highlight the prompt
+            print('\033[1m')
+            # prompt user with y/n before executing
+            print(f"[AI] The machine wants to run this command:\n[AI]\n[AI]    `{command}`\n[AI]")
+            answer = input("[AI] Obey? [y/n] ")
+            # unhighlight the prompt
+            print('\033[0m')
+            if answer.lower() != 'y':
+                return "Command not executed due to human intervention."
+            else:
+                result = subprocess.check_output(command, shell=True).decode('utf-8')
+                result = {"result": result[:4096]}
+                return json.dumps(result)
+
+        answer = agent.chat(task, before_function_call=self.before_function_call)
+        print(answer)
+        print('\n')
+        print(answer[0])
+
 
 class FsCommand(Command):
     command_name = 'fs'
@@ -1343,7 +1516,7 @@ class FsCommand(Command):
         return function_callable, function_kwargs
 
     def func(self, args):
-        self.args = args
+        super().func(args)  
         question = ' '.join(args.question)
         agent = AgentDingo(allow_codegen=False)
 
@@ -1380,7 +1553,7 @@ class FsCommand(Command):
             
             Returns
             -------
-            result : str
+            result : list
                 List of directory contents
             '''
             return json.dumps(os.listdir(path))
@@ -1396,8 +1569,8 @@ class FsCommand(Command):
             
             Returns
             -------
-            result : str
-                command output
+            result : json
+                Result of command
             '''
             # highlight the prompt
             print('\033[1m')
@@ -1409,8 +1582,36 @@ class FsCommand(Command):
             if answer.lower() != 'y':
                 return "Command not executed due to human intervention."
             result = subprocess.check_output(command, shell=True).decode('utf-8')
-            return result[:4096]
+            result = {"result": result[:4096]}
+            return json.dumps(result)
 
+        @agent.function
+        def run_python(code):
+            '''Execute python code
+
+            Parameters
+            ----------
+            code : str
+                python code to execute
+            
+            Returns
+            -------
+            result : str
+                Python code output
+            '''
+            # highlight the prompt
+            print('\033[1m')
+            # prompt user with y/n before executing
+            hl_code = highlight(code, PythonLexer(), TerminalFormatter())
+            print(f"[AI] The machine wants to run this python code:\n\n{hl_code}\n")
+            answer = input("[AI] Obey? [y/n] ")
+            # unhighlight the prompt
+            print('\033[0m')
+            if answer.lower() != 'y':
+                return "Code not executed due to human intervention."
+            # execute code
+            exec(code)
+            return "Code executed."
 
         answer = agent.chat(question, before_function_call=self.before_function_call)
         print(answer)
@@ -1463,23 +1664,27 @@ class ShodanCommand(Command):
                 del result[max_key]
             return json.dumps(result)
         
-        
         answer = agent.chat(question, before_function_call=self.before_function_call)
         print(answer[0])
-
 
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--test', action='store_true', help='Run tests')
     parser.add_argument('--debug', action='store_true', help='Enable debugging')
+    parser.add_argument('-m', '--model', help='Use this OpenAI model')
+    parser.add_argument('--list-models', action='store_true', help='List available OpenAI models')
+    parser.add_argument('-c', '--clipboard', action='store_true', help='Enable debugging')
     subparsers = parser.add_subparsers()
 
     ask = AskCommand(subparsers)
+    do = DoCommand(subparsers)
+    clipboard = ClipboardCommand(subparsers)
     summarize_file = SummarizeFileCommand(subparsers)
     update_file = UpdateFileCommand(subparsers)
     mass_ask = MassAsk(subparsers)
     mass_update_file = MassUpdateFile(subparsers)
+    embeddings = EmbeddingsCommand(subparsers)
     update_func = UpdateFunctionCommand(subparsers)
     update_class = UpdateClassCommand(subparsers)
     list_functions = ListFunctionsCommand(subparsers)
@@ -1494,6 +1699,9 @@ def main():
     #
     if len(sys.argv) != 1:  # No arguments, switch to interactive mode
         args = parser.parse_args()
+        if args.list_models:
+            list_gpt_models()
+            sys.exit()
         if args.debug:
             logging.basicConfig(level=logging.DEBUG)
         return args.func(args)

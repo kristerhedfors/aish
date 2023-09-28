@@ -35,10 +35,12 @@ env.sh
 *.code-workspace
 
 ./aish
-lab/
+lab*/
+img/
+7b/
 
 *.png
 
-function_calling.md
+function_calling.*
 
 example*.py
