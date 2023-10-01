@@ -35,7 +35,7 @@ from collections.abc import Callable
 from agent_dingo import AgentDingo
 import shodan
 import socket
-import pdb
+
 
 # spawn an interactive ipython shell on all exceptions
 def info(type, value, tb):
@@ -43,7 +43,7 @@ def info(type, value, tb):
     print()
     pdb.pm()
 
-sys.excepthook = info
+#sys.excepthook = info
 
 
 # return clipboard data as string
@@ -932,7 +932,7 @@ class Command(object):
     
     def func(self, args):
         self.args = args
-        print(f"{self.command_name} executed with arguments: {args}")
+        debug(f"{self.command_name} executed with arguments: {args}")
     
     def llm(self, **kw):
         return LLM(args=self.args, **kw)
@@ -1463,12 +1463,13 @@ class DoCommand(Command):
         self.parser.add_argument('task', nargs='+', help='Task to do')
 
     def before_function_call(self, function_name: str, function_callable: Callable, function_kwargs: dict):
-        print(f"[do] Calling function {function_name} with arguments {function_kwargs}")
+        debug(f"[do] Calling function {function_name} with arguments {function_kwargs}")
         return function_callable, function_kwargs
     
     def func(self, args):
         super().func(args)  
-        task = ' '.join(args.task)
+        prompt = 'Invoke shell commands through the `execute` function to complete the following task: '
+        task = prompt + ' '.join(args.task)
         agent = AgentDingo(allow_codegen=False)
         @agent.function
         def execute(command):
