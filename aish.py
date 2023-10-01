@@ -1495,7 +1495,10 @@ class DoCommand(Command):
             if answer.lower() != 'y':
                 return "Command not executed due to human intervention."
             else:
-                result = subprocess.check_output(command, shell=True).decode('utf-8')
+                try:
+                    result = subprocess.check_output(command, shell=True).decode('utf-8')
+                except subprocess.CalledProcessError as e:
+                    result = e.output.decode('utf-8')
                 result = {"result": result[:4096]}
                 return json.dumps(result)
 
